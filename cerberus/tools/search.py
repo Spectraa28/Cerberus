@@ -21,6 +21,10 @@ class SearchFilesTool:
         ),
         permission="read",
     )
+    
+    def __init__(self, timeout: float = 15.0, ignore_dirs: set[str] | None = None) -> None:
+        self.timeout = timeout
+        self.ignore_dirs = ignore_dirs or {".venv", "venv", "__pycache__", ".git", "node_modules"}
 
     async def run(self, input: SearchFilesInput, ctx: AgentContext) -> ToolResult:
         if input.pattern is None:

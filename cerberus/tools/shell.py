@@ -4,7 +4,6 @@ from cerberus.tools.base import ToolSpec, ToolResult, AgentContext
 
 class ShellExecInput(BaseModel):
     command:str
-    timeout: float = 15.0
     
 class ShellExecTool:
     spec= ToolSpec(
@@ -13,7 +12,12 @@ class ShellExecTool:
         permission="exec",
     )
     
+    def __init__(self, default_timeout: float = 15.0) -> None:
+        self.default_timeout = default_timeout
+    
     async def run(self,input:ShellExecInput,ctx:AgentContext) -> ToolResult:
+        timeout = input.timeout or self.default_timeout
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 input.command,

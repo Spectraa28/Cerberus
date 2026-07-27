@@ -15,8 +15,8 @@ async def main():
     config = load_config()
 
     registry = ToolRegistry()
-    registry.register(ShellExecTool(), category="shell")
-    registry.register(SearchFilesTool(), category="search")
+    registry.register(ShellExecTool(default_timeout=config.tools.shell_default_timeout), category="shell")
+    registry.register(SearchFilesTool(timeout=config.tools.search_timeout, ignore_dirs=set(config.tools.ignore_dirs)), category="search")
     registry.register(SearchWebTool(), category="search")
 
     input_models = {
@@ -27,7 +27,7 @@ async def main():
 
     # Parent agent: pro tier, full reasoning
     parent_provider = get_provider(config, tier="pro")
-    parent_runtime = Runtime(parent_provider, registry, input_models)
+    parent_runtime = Runtime(parent_provider, registry, input_models, max_turns=config.runtime.max_turns)
 
     # Sub-agent: fast tier, scoped to shell tools only (registry.filtered from earlier)
     sub_provider = get_provider(config, tier="fast")

@@ -5,10 +5,11 @@ from cerberus.providers.base import Provider, UserTurn, AssistantTurn, ToolResul
 
 
 class Runtime:
-    def __init__(self, provider: Provider, registry: ToolRegistry, input_models: dict[str, type]) -> None:
+    def __init__(self, provider, registry, input_models, max_turns: int = 10) -> None:
         self.provider = provider
         self.registry = registry
         self.input_models = input_models
+        self.max_turns = max_turns
         self.tool_schemas = tools_to_api_schema(registry, input_models)
 
     async def run(self, task: str, ctx: AgentContext, max_turns: int = 10) -> str:
