@@ -1,0 +1,28 @@
+default_provider: gemini
+default_tier: fast
+
+providers:
+  anthropic:
+    tiers:
+      pro: claude-sonnet-5
+      lite: claude-haiku-4-5-20251001
+      fast: claude-haiku-4-5-20251001
+  openai:
+    tiers:
+      pro: gpt-5.6-sol
+      lite: gpt-5.6-terra
+      fast: gpt-5.6-luna
+  gemini:
+    tiers:
+      pro: gemini-2.5-flash
+      lite: gemini-2.5-flash-lite
+      fast: gemini-2.5-flash-lite
+
+runtime:
+  max_tokens: 1024
+  max_turns: 10
+
+tools:
+  shell_default_timeout: 15.0
+  search_timeout: 15.0
+  ignore_dirs: [".venv", "venv", "__pycache__", ".git", "node_modules"]

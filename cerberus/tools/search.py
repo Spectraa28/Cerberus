@@ -6,23 +6,48 @@ from cerberus.tools.base import ToolSpec, ToolResult, AgentContext
 
 
 class SearchFilesInput(BaseModel):
-    pattern: str            # regex pattern to search for
-    path: str = "."         # directory to search in (relative to ctx.cwd)
-    file_glob: str = "*"    # e.g. "*.py"
+    pattern: str | None = None  # regex to search file CONTENTS; omit to just list matching files
+    path: str = "."
+    file_glob: str = "*"
     max_results: int = 50
 
 
 class SearchFilesTool:
     spec = ToolSpec(
         name="search_files",
-        description="Search files for a regex pattern, using ripgrep if available.",
+        description=(
+            "Find files by name/glob, optionally filtering by content regex. "
+            "Omit 'pattern' to just list files matching file_glob; provide it to search their contents."
+        ),
         permission="read",
     )
 
     async def run(self, input: SearchFilesInput, ctx: AgentContext) -> ToolResult:
+        if input.pattern is None:
+            return await self._list_files(input, ctx)
         if await self._has_ripgrep():
             return await self._run_ripgrep(input, ctx)
         return self._run_python_fallback(input, ctx)
+
+    async def _list_files(self, input: SearchFilesInput, ctx: AgentContext) -> ToolResult:
+        try:
+            base = Path(ctx.cwd) / input.path
+            ignore_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules"}
+
+            all_files = [
+                f for f in base.rglob(input.file_glob)
+                if f.is_file() and not any(part in ignore_dirs for part in f.parts)
+            ]
+            truncated = len(all_files) > input.max_results
+            files = [str(f) for f in all_files[: input.max_results]]
+
+            output = "\n".join(files) or "(no files found)"
+            if truncated:
+                output += f"\n... truncated, showing {input.max_results} of {len(all_files)} total"
+
+            return ToolResult(ok=True, output=output, error=None)
+        except Exception as e:
+            return ToolResult(ok=False, output="", error=str(e))
 
     async def _has_ripgrep(self) -> bool:
         proc = await asyncio.create_subprocess_shell(
@@ -47,7 +72,6 @@ class SearchFilesTool:
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
             output = stdout.decode(errors="replace")
-            # rg returns exit code 1 when no matches — that's not an error
             if proc.returncode not in (0, 1):
                 return ToolResult(ok=False, output="", error=stderr.decode(errors="replace"))
             return ToolResult(ok=True, output=output or "(no matches)", error=None)
