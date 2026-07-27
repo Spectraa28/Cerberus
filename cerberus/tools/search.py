@@ -36,7 +36,7 @@ class SearchFilesTool:
     async def _list_files(self, input: SearchFilesInput, ctx: AgentContext) -> ToolResult:
         try:
             base = Path(ctx.cwd) / input.path
-            ignore_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules"}
+            ignore_dirs = self.ignore_dirs
 
             all_files = [
                 f for f in base.rglob(input.file_glob)

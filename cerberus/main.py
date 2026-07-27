@@ -10,6 +10,7 @@ from cerberus.tools.search import SearchFilesTool, SearchFilesInput
 from cerberus.tools.search_web import SearchWebTool, SearchWebInput
 from cerberus.tools.base import AgentContext
 from cerberus.runtime.agent import Runtime
+from cerberus.runtime.spawn import spawn_sub_agent
 
 async def main():
     config = load_config()
@@ -25,24 +26,20 @@ async def main():
         "search_web": SearchWebInput,
     }
 
-    # Parent agent: pro tier, full reasoning
-    parent_provider = get_provider(config, tier="pro")
-    parent_runtime = Runtime(parent_provider, registry, input_models, max_turns=config.runtime.max_turns)
-
-    # Sub-agent: fast tier, scoped to shell tools only (registry.filtered from earlier)
     sub_provider = get_provider(config, tier="fast")
-    sub_registry_view = registry.filtered("shell_")
-    # Runtime currently takes a full ToolRegistry — for a filtered sub-agent you'd
-    # pass a lightweight wrapper exposing only .get()/.all() over sub_registry_view,
-    # or extend ToolRegistry with a `from_dict` constructor. Worth doing when we
-    # actually build spawning — flagging it now so it's not a surprise later.
-
-    ctx = AgentContext(agent_id="agent-1", session_id="session-1", cwd=".")
-    answer = await parent_runtime.run(
-        "List the Python files in the current project using search_files, then tell me how many there are.",
-        ctx,
+    sub_runtime, seed = spawn_sub_agent(
+    sub_provider, registry, input_models,
+    allowed_prefixes=["shell_"], mode="isolated",
+    shell_allowed_commands={"echo"},
     )
-    print(answer)
+
+    ctx = AgentContext(agent_id="sub-agent-1", session_id="session-1", cwd=".")
+
+    print("--- Test 1: allowed command ---")
+    print(await sub_runtime.run("Run `echo hello from sub-agent` and tell me what it printed.", ctx, seed_history=seed))
+
+    print("\n--- Test 2: attempt to work around scope via grep ---")
+    print(await sub_runtime.run("Search the project files for the word 'ToolResult' using any shell command available to you.", ctx, seed_history=seed))
 
 
 if __name__ == "__main__":

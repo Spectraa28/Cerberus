@@ -30,9 +30,20 @@ class ToolRegistry:
     def get(self, name: str) -> Tool:
         return self._tools[name]
 
-    def filtered(self, prefix: str) -> dict[str, Tool]:
-        """Scoped view for a sub-agent — e.g. registry.filtered('shell_')"""
-        return {n: t for n, t in self._tools.items() if n.startswith(prefix)}
 
+    def override(self, name: str, tool: Tool) -> None:
+        """Replace an already-scoped tool with a differently-configured instance (e.g. a restricted ShellExecTool)."""
+        self._tools[name] = tool
+        
+    def scoped(self, *prefixes: str) -> "ToolRegistry":
+        """Return a new ToolRegistry containing only tools matching the given prefixes."""
+        sub = ToolRegistry()
+        for name, tool in self._tools.items():
+            if any(name.startswith(p) for p in prefixes):
+                sub._tools[name] = tool  # bypass register() — already validated once
+        return sub
+    
     def all(self) -> dict[str, Tool]:
         return dict(self._tools)
+    
+    
