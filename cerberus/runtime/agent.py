@@ -2,6 +2,7 @@ from cerberus.tools.registry import ToolRegistry
 from cerberus.tools.base import AgentContext
 from cerberus.tools.adapter import tools_to_api_schema
 from cerberus.providers.base import Provider, UserTurn, AssistantTurn, ToolResultTurn, Turn
+from cerberus.runtime.session import EventLog
 
 
 class Runtime:
@@ -11,11 +12,13 @@ class Runtime:
         registry: ToolRegistry,
         input_models: dict[str, type],
         max_turns: int = 10,
+        event_log: EventLog | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
         self.input_models = input_models
         self.max_turns = max_turns
+        self.event_log = event_log
         self.tool_schemas = tools_to_api_schema(registry, input_models)
 
     async def run(
@@ -26,13 +29,25 @@ class Runtime:
     ) -> str:
         history: list[Turn] = list(seed_history or []) + [UserTurn(content=task)]
 
+        if self.event_log:
+            await self.event_log.append_event(ctx.session_id, ctx.agent_id, "user", {"content": task})
+
         for _ in range(self.max_turns):
             response = await self.provider.call(history, self.tool_schemas)
 
             if response.stop_reason == "end":
+                if self.event_log:
+                    await self.event_log.append_event(
+                        ctx.session_id, ctx.agent_id, "assistant", {"text": response.text}
+                    )
                 return response.text or ""
 
             history.append(AssistantTurn(text=response.text, tool_calls=response.tool_calls))
+            if self.event_log:
+                await self.event_log.append_event(
+                    ctx.session_id, ctx.agent_id, "assistant",
+                    {"text": response.text, "tool_calls": [tc.model_dump() for tc in response.tool_calls]},
+                )
 
             results = []
             for tc in response.tool_calls:
@@ -48,5 +63,7 @@ class Runtime:
                 })
 
             history.append(ToolResultTurn(results=results))
+            if self.event_log:
+                await self.event_log.append_event(ctx.session_id, ctx.agent_id, "tool_result", {"results": results})
 
         return "(max turns reached without a final answer)"
