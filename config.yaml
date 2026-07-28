@@ -14,7 +14,7 @@ providers:
       fast: gpt-5.6-luna
   gemini:
     tiers:
-      pro: gemini-2.5-flash
+      pro: gemini-2.5-flash-lite
       lite: gemini-2.5-flash-lite
       fast: gemini-2.5-flash-lite
 
