@@ -25,3 +25,9 @@
   boundary when shell access is in scope, since shell can reimplement
   other tools. Default posture: shell access is granted deliberately per
   sub-agent, not bundled in casually.
+
+- ~~context_seeded spawn mode is untested against Anthropic/OpenAI~~ — FIXED.
+  Out-of-scope tool_use/tool_result turns are now collapsed into plain-text
+  context turns before seeding (see `_filter_history_to_scope` in
+  `runtime/spawn.py`), so seeded history never references a tool outside
+  the sub-agent's declared scope, regardless of provider strictness.
