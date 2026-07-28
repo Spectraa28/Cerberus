@@ -3,6 +3,7 @@ import json
 from google import genai
 from google.genai import types
 from cerberus.providers.base import Turn, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, NormalizedResponse
+import base64
 
 
 class GeminiProvider:
@@ -30,7 +31,11 @@ class GeminiProvider:
                 if turn.text:
                     parts.append(types.Part(text=turn.text))
                 for tc in turn.tool_calls:
-                    parts.append(types.Part(function_call=types.FunctionCall(name=tc.name, args=tc.input)))
+                    part = types.Part(function_call=types.FunctionCall(name=tc.name, args=tc.input))
+                    if tc.thought_signature:
+                        # signature was captured as base64 text for safe JSON storage; decode back to bytes for the SDK
+                        part.thought_signature = base64.b64decode(tc.thought_signature)
+                    parts.append(part)
                 contents.append(types.Content(role="model", parts=parts))
             elif isinstance(turn, ToolResultTurn):
                 parts = [
@@ -53,6 +58,13 @@ class GeminiProvider:
             if part.text:
                 text = (text or "") + part.text
             if part.function_call:
-                tool_calls.append(ToolCall(id=part.function_call.name, name=part.function_call.name, input=dict(part.function_call.args)))
+                sig = getattr(part, "thought_signature", None)
+                sig_b64 = base64.b64encode(sig).decode() if sig else None
+                tool_calls.append(ToolCall(
+                    id=part.function_call.name,
+                    name=part.function_call.name,
+                    input=dict(part.function_call.args),
+                    thought_signature=sig_b64,
+                ))
         stop_reason = "tool_use" if tool_calls else "end"
         return NormalizedResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason)

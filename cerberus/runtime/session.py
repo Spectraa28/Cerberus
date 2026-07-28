@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 import asyncio
+from typing import Callable, Awaitable
 import aiosqlite
 
 SCHEMA = """
@@ -28,7 +29,11 @@ class EventLog:
     def __init__(self, db_path: str = "cerberus_sessions.db") -> None:
         self.db_path = db_path
         self._db: aiosqlite.Connection | None = None
-        self._write_lock = asyncio.Lock()  # serializes appends across ALL concurrent agents
+        self._write_lock = asyncio.Lock()
+        self._broadcaster: Callable[[str, dict], Awaitable[None]] | None = None
+
+    def set_broadcaster(self, fn: Callable[[str, dict], Awaitable[None]]) -> None:
+        self._broadcaster = fn
 
     async def connect(self) -> None:
         self._db = await aiosqlite.connect(self.db_path)
@@ -49,19 +54,25 @@ class EventLog:
         return session_id
 
     async def append_event(self, session_id: str, agent_id: str, event_type: str, payload: dict) -> int:
-        async with self._write_lock:  # read-next-seq + insert is now atomic w.r.t. other coroutines
+        async with self._write_lock:
             async with self._db.execute(
                 "SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE session_id = ?", (session_id,)
             ) as cur:
                 row = await cur.fetchone()
                 next_seq = row[0]
 
+            ts = time.time()
             await self._db.execute(
                 "INSERT INTO events (session_id, seq, ts, type, agent_id, payload) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, next_seq, time.time(), event_type, agent_id, json.dumps(payload)),
+                (session_id, next_seq, ts, event_type, agent_id, json.dumps(payload)),
             )
             await self._db.commit()
-            return next_seq
+
+        if self._broadcaster:
+            event = {"seq": next_seq, "ts": ts, "type": event_type, "agent_id": agent_id, "payload": payload}
+            await self._broadcaster(session_id, event)
+
+        return next_seq
 
     async def replay_from(self, session_id: str, from_seq: int = 0) -> list[dict]:
         events = []

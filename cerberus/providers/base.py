@@ -5,6 +5,7 @@ class ToolCall(BaseModel):
     id: str
     name: str
     input: dict
+    thought_signature: str | None = None  # Gemini 3-specific; unused by Anthropic/OpenAI
     
 class AssistantTurn(BaseModel):
     role: Literal["assistant"] = "assistant"
