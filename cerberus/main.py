@@ -20,32 +20,39 @@ async def main():
     config = load_config()
     event_log = EventLog()
     await event_log.connect()
-    session_id = await event_log.create_session(label="concurrent test")
+    session_id = await event_log.create_session(label="resume test")
 
     registry = ToolRegistry()
     registry.register(ShellExecTool(default_timeout=config.tools.shell_default_timeout), category="shell")
     input_models = {"shell_exec": ShellExecInput}
 
     provider = get_provider(config, tier="fast")
+    ctx = AgentContext(agent_id="agent-1", session_id=session_id, cwd=".")
 
-    async def run_sub_agent(agent_id: str, message: str):
-        runtime = Runtime(provider, registry, input_models, max_turns=3, event_log=event_log)
-        ctx = AgentContext(agent_id=agent_id, session_id=session_id, cwd=".")
-        return await runtime.run(f"Run `echo {message}` and tell me what it printed.", ctx)
+    # --- Simulate a crash: manually write a user turn + an assistant turn
+    # that made a tool call, but NEVER write the tool_result. This is exactly
+    # what the log would look like if the process died right after the model
+    # decided to call shell_exec, before the tool actually ran.
+    await event_log.append_event(session_id, ctx.agent_id, "user", {
+        "content": "Run `echo resumed successfully` and tell me what it printed."
+    })
+    await event_log.append_event(session_id, ctx.agent_id, "assistant", {
+        "text": None,
+        "tool_calls": [{"id": "fake_call_1", "name": "shell_exec", "input": {"command": "echo resumed successfully"}}],
+    })
+    print("--- Simulated crash: log ends mid tool-call, no tool_result was ever written ---")
 
-    # THREE sub-agents writing to the SAME session concurrently
-    results = await asyncio.gather(
-        run_sub_agent("sub-agent-a", "hello from A"),
-        run_sub_agent("sub-agent-b", "hello from B"),
-        run_sub_agent("sub-agent-c", "hello from C"),
-    )
-    for r in results:
-        print(r)
+    # --- Now bring up a BRAND NEW Runtime, as if this were a fresh process,
+    # and resume purely from the log ---
+    fresh_runtime = Runtime(provider, registry, input_models, max_turns=config.runtime.max_turns, event_log=event_log)
+    answer = await fresh_runtime.resume(ctx)
+    print("--- Resumed answer ---")
+    print(answer)
 
-    print("\n--- Full interleaved replay ---")
-    events = await event_log.replay_from(session_id, from_seq=0)
+    print("\n--- Full replay after resume ---")
+    events = await event_log.replay_from(session_id)
     for e in events:
-        print(f"[{e['seq']}] {e['type']} ({e['agent_id']})")
+        print(f"[{e['seq']}] {e['type']} ({e['agent_id']}): {e['payload']}")
 
     await event_log.close()
     
