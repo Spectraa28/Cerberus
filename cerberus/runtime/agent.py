@@ -3,6 +3,7 @@ from cerberus.tools.base import AgentContext
 from cerberus.tools.adapter import tools_to_api_schema
 from cerberus.providers.base import Provider, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, Turn
 from cerberus.runtime.session import EventLog
+from cerberus.runtime.compaction import compact_if_needed
 
 
 class Runtime:
@@ -42,6 +43,10 @@ class Runtime:
 
     async def _loop(self, history: list[Turn], ctx: AgentContext) -> str:
         for _ in range(self.max_turns):
+            history, summary_text = await compact_if_needed(history, self.provider)
+            if summary_text:
+                await self._log(ctx, "summary", {"summary": summary_text})
+
             response = await self.provider.call(history, self.tool_schemas)
 
             if response.stop_reason == "end":
@@ -67,18 +72,29 @@ class Runtime:
 
     async def resume(self, ctx: AgentContext) -> str:
         """
-        Reconstruct this agent's history from the event log and continue.
-        Handles the crash-mid-tool-call case: if the log ends on an assistant
-        turn with tool_calls but no matching tool_result, those calls were
-        never executed — run them now before resuming the normal loop.
+        Reconstruct history from the log — but starting from the LATEST summary
+        event, not from seq 0. This is what bounds resume() cost regardless of
+        how long the session has actually run.
         """
         if not self.event_log:
             raise RuntimeError("resume() requires an event_log")
 
-        events = await self.event_log.replay_from(ctx.session_id)
+        all_events = await self.event_log.replay_from(ctx.session_id)
+        agent_events = [e for e in all_events if e["agent_id"] == ctx.agent_id]
+
+        last_summary_seq = -1
+        summary_text = None
+        for e in agent_events:
+            if e["type"] == "summary":
+                last_summary_seq = e["seq"]
+                summary_text = e["payload"]["summary"]
+
         history: list[Turn] = []
-        for e in events:
-            if e["agent_id"] != ctx.agent_id:
+        if summary_text:
+            history.append(UserTurn(content=f"[Summary of earlier conversation]\n{summary_text}"))
+
+        for e in agent_events:
+            if e["seq"] <= last_summary_seq:
                 continue
             if e["type"] == "user":
                 history.append(UserTurn(content=e["payload"]["content"]))
@@ -89,7 +105,6 @@ class Runtime:
                 history.append(ToolResultTurn(results=e["payload"]["results"]))
 
         if history and isinstance(history[-1], AssistantTurn) and history[-1].tool_calls:
-            # crashed after the assistant turn was logged but before tools ran
             results = await self._dispatch_tools(history[-1].tool_calls, ctx)
             history.append(ToolResultTurn(results=results))
             await self._log(ctx, "tool_result", {"results": results})
