@@ -48,12 +48,14 @@ class Runtime:
         input_models: dict[str, type],
         max_turns: int = 10,
         event_log: EventLog | None = None,
+        pause_checker=None
     ) -> None:
         self.provider = provider
         self.registry = registry
         self.input_models = input_models
         self.max_turns = max_turns
         self.event_log = event_log
+        self.pause_checker = pause_checker
         self.tool_schemas = tools_to_api_schema(registry, input_models)
 
     async def _log(self, ctx: AgentContext, event_type: str, payload: dict) -> None:
@@ -67,30 +69,49 @@ class Runtime:
             model = self.input_models[tc.name]
             tool_input = model(**tc.input)
             result = await tool.run(tool_input, ctx)
+
+            if result.ok:
+                output_text = result.output
+            else:
+                # Never discard stdout on failure — many tools (pytest, linters, etc.)
+                # write their real diagnostic info there, not to stderr.
+                parts = []
+                if result.output:
+                    parts.append(result.output)
+                if result.error:
+                    parts.append(f"[stderr] {result.error}")
+                output_text = "\n".join(parts) if parts else "(command failed with no output captured)"
+
             results.append({
                 "tool_call_id": tc.id,
                 "name": tc.name,
-                "output": result.output if result.ok else f"ERROR: {result.error}",
+                "output": output_text,
                 "is_error": not result.ok,
             })
         return results
 
     async def _loop(self, history: list[Turn], ctx: AgentContext) -> str:
         for _ in range(self.max_turns):
+            if self.pause_checker and await self.pause_checker(ctx):
+                await self._log(ctx, "status", {"status": "paused"})
+                return "(paused)"
+
             history, summary_text = await compact_if_needed(history, self.provider)
             if summary_text:
                 await self._log(ctx, "summary", {"summary": summary_text})
 
             response = await self.provider.call(history, self.tool_schemas)
+            usage_payload = response.usage.model_dump() if response.usage else None
 
             if response.stop_reason == "end":
-                await self._log(ctx, "assistant", {"text": response.text})
+                await self._log(ctx, "assistant", {"text": response.text, "usage": usage_payload})
                 return response.text or ""
 
             history.append(AssistantTurn(text=response.text, tool_calls=response.tool_calls))
             await self._log(ctx, "assistant", {
                 "text": response.text,
                 "tool_calls": [tc.model_dump() for tc in response.tool_calls],
+                "usage": usage_payload,
             })
 
             results = await self._dispatch_tools(response.tool_calls, ctx)

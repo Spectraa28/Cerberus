@@ -2,7 +2,7 @@ import os
 import json
 from google import genai
 from google.genai import types
-from cerberus.providers.base import Turn, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, NormalizedResponse
+from cerberus.providers.base import Turn,Usage, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, NormalizedResponse
 import base64
 
 
@@ -67,4 +67,8 @@ class GeminiProvider:
                     thought_signature=sig_b64,
                 ))
         stop_reason = "tool_use" if tool_calls else "end"
-        return NormalizedResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason)
+        usage = Usage(
+        input_tokens=response.usage_metadata.prompt_token_count,
+        output_tokens=response.usage_metadata.candidates_token_count,
+        )
+        return NormalizedResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason, usage=usage)

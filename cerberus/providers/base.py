@@ -16,6 +16,11 @@ class UserTurn(BaseModel):
     role: Literal["user"] = "user"
     content: str
     
+class Usage(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    
+
 class ToolResultTurn(BaseModel):
     role: Literal["tool_result"] = "tool_result"
     results: list[dict]
@@ -26,6 +31,7 @@ class NormalizedResponse(BaseModel):
     text: str | None
     tool_calls: list[ToolCall]
     stop_reason: Literal["tool_use", "end"]
+    usage: Usage | None = None
 
 
 class Provider(Protocol):

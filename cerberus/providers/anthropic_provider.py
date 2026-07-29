@@ -1,6 +1,6 @@
 import os
 from anthropic import Anthropic
-from cerberus.providers.base import Turn, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, NormalizedResponse
+from cerberus.providers.base import Turn,Usage, UserTurn, AssistantTurn, ToolResultTurn, ToolCall, NormalizedResponse
 
 
 class AnthropicProvider:
@@ -44,10 +44,12 @@ class AnthropicProvider:
             tools=self._to_native_tools(tool_schemas),
             messages=self._to_native_messages(history),
         )
+        usage = Usage(input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens)
+
         text = "".join(b.text for b in response.content if b.type == "text") or None
         tool_calls = [
             ToolCall(id=b.id, name=b.name, input=b.input)
             for b in response.content if b.type == "tool_use"
         ]
         stop_reason = "tool_use" if response.stop_reason == "tool_use" else "end"
-        return NormalizedResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason)
+        return NormalizedResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason,usage=usage)

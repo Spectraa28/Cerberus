@@ -13,17 +13,24 @@ from cerberus.tools.base import AgentContext
 from cerberus.runtime.agent import Runtime, reconstruct_history
 from cerberus.runtime.spawn import spawn_sub_agent
 from cerberus.runtime.session import EventLog
-
+from cerberus.tools.search import SearchFilesTool, SearchFilesInput
+from cerberus.tools.search_web import SearchWebTool, SearchWebInput
 
 # --- Shared state, built once at module load ---
 event_log = EventLog()
 _connections: dict[str, set[WebSocket]] = {}
+_pause_flags: dict[str, bool] = {}  # key: f"{session_id}:{agent_id}"
 
 _config = load_config()
 _registry = ToolRegistry()
 _registry.register(ShellExecTool(default_timeout=_config.tools.shell_default_timeout), category="shell")
-_input_models = {"shell_exec": ShellExecInput}
-
+_registry.register(SearchFilesTool(timeout=_config.tools.search_timeout, ignore_dirs=set(_config.tools.ignore_dirs)), category="search")
+_registry.register(SearchWebTool(), category="search")
+_input_models = {
+    "shell_exec": ShellExecInput,
+    "search_files": SearchFilesInput,
+    "search_web": SearchWebInput,
+}
 
 def _provider_for(tier: str):
     return get_provider(_config, tier=tier)
@@ -78,7 +85,8 @@ class RunRequest(BaseModel):
 @app.post("/sessions/{session_id}/run")
 async def run_agent(session_id: str, req: RunRequest):
     provider = _provider_for(req.tier)
-    runtime = Runtime(provider, _registry, _input_models, max_turns=_config.runtime.max_turns, event_log=event_log)
+    runtime = Runtime(provider, _registry, _input_models, max_turns=_config.runtime.max_turns,
+                       event_log=event_log, pause_checker=_check_pause)
     ctx = AgentContext(agent_id=req.agent_id, session_id=session_id, cwd=".")
     answer = await runtime.run(req.task, ctx)
     return {"agent_id": req.agent_id, "answer": answer}
@@ -115,3 +123,38 @@ async def spawn_agent(session_id: str, req: SpawnRequest):
     ctx = AgentContext(agent_id=req.sub_agent_id, session_id=session_id, cwd=".")
     answer = await sub_runtime.run(req.task, ctx, seed_history=seed)
     return {"agent_id": req.sub_agent_id, "answer": answer}
+
+
+def _pause_key(session_id: str, agent_id: str) -> str:
+    return f"{session_id}:{agent_id}"
+
+async def _check_pause(ctx: AgentContext) -> bool:
+    return _pause_flags.get(_pause_key(ctx.session_id, ctx.agent_id), False)
+
+
+class PauseRequest(BaseModel):
+    agent_id: str
+
+@app.post("/sessions/{session_id}/pause")
+async def pause_agent(session_id: str, req: PauseRequest):
+    _pause_flags[_pause_key(session_id, req.agent_id)] = True
+    return {"paused": True}
+
+@app.post("/sessions/{session_id}/unpause")
+async def unpause_agent(session_id: str, req: PauseRequest):
+    _pause_flags[_pause_key(session_id, req.agent_id)] = False
+    return {"paused": False}
+
+class ResumeRequest(BaseModel):
+    agent_id: str
+    tier: str = "fast"
+
+@app.post("/sessions/{session_id}/resume")
+async def resume_agent(session_id: str, req: ResumeRequest):
+    _pause_flags[_pause_key(session_id, req.agent_id)] = False
+    provider = _provider_for(req.tier)
+    runtime = Runtime(provider, _registry, _input_models, max_turns=_config.runtime.max_turns,
+                       event_log=event_log, pause_checker=_check_pause)
+    ctx = AgentContext(agent_id=req.agent_id, session_id=session_id, cwd=".")
+    answer = await runtime.resume(ctx)
+    return {"agent_id": req.agent_id, "answer": answer}
