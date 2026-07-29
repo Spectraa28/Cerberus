@@ -4,6 +4,8 @@ from cerberus.tools.shell import ShellExecTool
 from cerberus.providers.base import Provider, Turn, AssistantTurn, ToolResultTurn
 from cerberus.runtime.agent import Runtime
 from cerberus.providers.base import UserTurn
+from cerberus.runtime.session import EventLog
+
 
 def _filter_history_to_scope(history: list[Turn], allowed_tool_names: set[str]) -> list[Turn]:
     """
@@ -54,6 +56,7 @@ def spawn_sub_agent(
     parent_history: list[Turn] | None = None,
     max_turns: int = 5,
     shell_allowed_commands: set[str] | None = None,
+    event_log: EventLog | None = None,   # NEW
 ) -> tuple[Runtime, list[Turn] | None]:
     scoped_registry = parent_registry.scoped(*allowed_prefixes)
 
@@ -64,7 +67,10 @@ def spawn_sub_agent(
     scoped_input_models = {
         name: model for name, model in input_models.items() if name in scoped_registry.all()
     }
-    runtime = Runtime(provider, scoped_registry, scoped_input_models, max_turns=max_turns)
+    runtime = Runtime(
+        provider, scoped_registry, scoped_input_models,
+        max_turns=max_turns, event_log=event_log,   # NEW — this was the missing piece
+    )
 
     seed = None
     if mode == "context_seeded" and parent_history:

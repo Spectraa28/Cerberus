@@ -6,6 +6,40 @@ from cerberus.runtime.session import EventLog
 from cerberus.runtime.compaction import compact_if_needed
 
 
+async def reconstruct_history(event_log: EventLog, session_id: str, agent_id: str) -> list[Turn]:
+    """
+    Rebuild a Turn history for one agent from the event log, starting from
+    its latest summary (if any) rather than from the beginning — shared by
+    Runtime.resume() and the gateway's spawn endpoint so both stay in sync.
+    """
+    all_events = await event_log.replay_from(session_id)
+    agent_events = [e for e in all_events if e["agent_id"] == agent_id]
+
+    last_summary_seq = -1
+    summary_text = None
+    for e in agent_events:
+        if e["type"] == "summary":
+            last_summary_seq = e["seq"]
+            summary_text = e["payload"]["summary"]
+
+    history: list[Turn] = []
+    if summary_text:
+        history.append(UserTurn(content=f"[Summary of earlier conversation]\n{summary_text}"))
+
+    for e in agent_events:
+        if e["seq"] <= last_summary_seq:
+            continue
+        if e["type"] == "user":
+            history.append(UserTurn(content=e["payload"]["content"]))
+        elif e["type"] == "assistant":
+            tool_calls = [ToolCall(**tc) for tc in e["payload"].get("tool_calls", [])]
+            history.append(AssistantTurn(text=e["payload"].get("text"), tool_calls=tool_calls))
+        elif e["type"] == "tool_result":
+            history.append(ToolResultTurn(results=e["payload"]["results"]))
+
+    return history
+
+
 class Runtime:
     def __init__(
         self,
@@ -71,38 +105,10 @@ class Runtime:
         return await self._loop(history, ctx)
 
     async def resume(self, ctx: AgentContext) -> str:
-        """
-        Reconstruct history from the log — but starting from the LATEST summary
-        event, not from seq 0. This is what bounds resume() cost regardless of
-        how long the session has actually run.
-        """
         if not self.event_log:
             raise RuntimeError("resume() requires an event_log")
 
-        all_events = await self.event_log.replay_from(ctx.session_id)
-        agent_events = [e for e in all_events if e["agent_id"] == ctx.agent_id]
-
-        last_summary_seq = -1
-        summary_text = None
-        for e in agent_events:
-            if e["type"] == "summary":
-                last_summary_seq = e["seq"]
-                summary_text = e["payload"]["summary"]
-
-        history: list[Turn] = []
-        if summary_text:
-            history.append(UserTurn(content=f"[Summary of earlier conversation]\n{summary_text}"))
-
-        for e in agent_events:
-            if e["seq"] <= last_summary_seq:
-                continue
-            if e["type"] == "user":
-                history.append(UserTurn(content=e["payload"]["content"]))
-            elif e["type"] == "assistant":
-                tool_calls = [ToolCall(**tc) for tc in e["payload"].get("tool_calls", [])]
-                history.append(AssistantTurn(text=e["payload"].get("text"), tool_calls=tool_calls))
-            elif e["type"] == "tool_result":
-                history.append(ToolResultTurn(results=e["payload"]["results"]))
+        history = await reconstruct_history(self.event_log, ctx.session_id, ctx.agent_id)
 
         if history and isinstance(history[-1], AssistantTurn) and history[-1].tool_calls:
             results = await self._dispatch_tools(history[-1].tool_calls, ctx)

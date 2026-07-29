@@ -10,7 +10,8 @@ from cerberus.providers.factory import get_provider
 from cerberus.tools.registry import ToolRegistry
 from cerberus.tools.shell import ShellExecTool, ShellExecInput
 from cerberus.tools.base import AgentContext
-from cerberus.runtime.agent import Runtime
+from cerberus.runtime.agent import Runtime, reconstruct_history
+from cerberus.runtime.spawn import spawn_sub_agent
 from cerberus.runtime.session import EventLog
 
 
@@ -22,7 +23,10 @@ _config = load_config()
 _registry = ToolRegistry()
 _registry.register(ShellExecTool(default_timeout=_config.tools.shell_default_timeout), category="shell")
 _input_models = {"shell_exec": ShellExecInput}
-_provider = get_provider(_config, tier="fast")
+
+
+def _provider_for(tier: str):
+    return get_provider(_config, tier=tier)
 
 
 async def broadcast_event(session_id: str, event: dict):
@@ -41,24 +45,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-# --- WebSocket: attach to a session, replay history, then receive live events ---
 @app.websocket("/ws/{session_id}")
 async def session_socket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     _connections.setdefault(session_id, set()).add(websocket)
-
     try:
         events = await event_log.replay_from(session_id, from_seq=0)
         for e in events:
             await websocket.send_json(e)
-
         while True:
-            await websocket.receive_text()  # keep-alive; client->server commands go here later
+            await websocket.receive_text()
     except WebSocketDisconnect:
         _connections[session_id].discard(websocket)
 
 
-# --- HTTP: create a session ---
 class CreateSessionRequest(BaseModel):
     label: str | None = None
 
@@ -69,20 +69,49 @@ async def create_session(req: CreateSessionRequest):
     return {"session_id": session_id}
 
 
-# --- HTTP: run an agent against a session, using the SAME EventLog instance
-# that has the broadcaster registered, so every append_event() call
-# genuinely pushes live to any connected WebSocket clients ---
 class RunRequest(BaseModel):
     task: str
     agent_id: str = "gateway-agent"
+    tier: str = "fast"
 
 
 @app.post("/sessions/{session_id}/run")
 async def run_agent(session_id: str, req: RunRequest):
-    runtime = Runtime(
-        _provider, _registry, _input_models,
-        max_turns=_config.runtime.max_turns, event_log=event_log,
-    )
+    provider = _provider_for(req.tier)
+    runtime = Runtime(provider, _registry, _input_models, max_turns=_config.runtime.max_turns, event_log=event_log)
     ctx = AgentContext(agent_id=req.agent_id, session_id=session_id, cwd=".")
     answer = await runtime.run(req.task, ctx)
-    return {"answer": answer}
+    return {"agent_id": req.agent_id, "answer": answer}
+
+
+class SpawnRequest(BaseModel):
+    task: str
+    parent_agent_id: str
+    sub_agent_id: str
+    allowed_prefixes: list[str]
+    mode: str = "isolated"  # "isolated" | "context_seeded"
+    shell_allowed_commands: list[str] | None = None
+    tier: str = "fast"
+
+
+@app.post("/sessions/{session_id}/spawn")
+async def spawn_agent(session_id: str, req: SpawnRequest):
+    provider = _provider_for(req.tier)
+
+    parent_history = None
+    if req.mode == "context_seeded":
+        parent_history = await reconstruct_history(event_log, session_id, req.parent_agent_id)
+
+    sub_runtime, seed = spawn_sub_agent(
+        provider, _registry, _input_models,
+        allowed_prefixes=req.allowed_prefixes,
+        mode=req.mode,
+        parent_history=parent_history,
+        max_turns=_config.runtime.max_turns,
+        shell_allowed_commands=set(req.shell_allowed_commands) if req.shell_allowed_commands else None,
+        event_log=event_log,   # NEW — the fix
+    )
+
+    ctx = AgentContext(agent_id=req.sub_agent_id, session_id=session_id, cwd=".")
+    answer = await sub_runtime.run(req.task, ctx, seed_history=seed)
+    return {"agent_id": req.sub_agent_id, "answer": answer}
