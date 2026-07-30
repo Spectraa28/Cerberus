@@ -5,16 +5,29 @@ import httpx
 import websockets
 from rich.console import Console
 from rich.panel import Panel
+from rich.markdown import Markdown
 
 console = Console()
-
 GATEWAY_URL = "http://localhost:8000"
-AGENT_ID = "cerberus"  # renamed from "you" — this identifies the agent, not the human
+AGENT_ID = "cerberus"
+
+TOOL_ICONS = {"shell_exec": "🖥", "search_files": "🔎", "search_web": "🌐"}
 
 
-def _truncate(text: str, limit: int = 150) -> str:
-    text = text.replace("\n", " ")
-    return text if len(text) <= limit else text[:limit] + "…"
+def _summarize_call(name: str, args: dict) -> str:
+    if name == "shell_exec":
+        cmd = args.get("command", "")
+        return cmd if len(cmd) <= 80 else cmd[:80] + "…"
+    if name == "search_files":
+        bits = []
+        if args.get("pattern"):
+            bits.append(f"pattern={args['pattern']!r}")
+        if args.get("file_glob"):
+            bits.append(f"glob={args['file_glob']!r}")
+        return ", ".join(bits) or "(list files)"
+    if name == "search_web":
+        return args.get("query", "")
+    return str(args)[:80]
 
 
 class TerminalSession:
@@ -24,7 +37,7 @@ class TerminalSession:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.is_paused = False
-        self._last_sent_task: str | None = None  # dedupes our own echoed input
+        self._last_sent_task: str | None = None
 
     def status_panel(self) -> Panel:
         total = self.total_input_tokens + self.total_output_tokens
@@ -47,16 +60,18 @@ class TerminalSession:
         if etype == "user":
             content = payload["content"]
             if content == self._last_sent_task:
-                # we just typed this ourselves — the terminal already echoed it, skip the duplicate
                 self._last_sent_task = None
                 return
             console.print(f"[bold cyan]you[/bold cyan] [dim]›[/dim] {content}")
 
         elif etype == "assistant":
             if payload.get("text"):
-                console.print(f"[bold green]{agent}[/bold green]: {payload['text']}")
+                console.print(f"[bold green]{agent}[/bold green]:")
+                console.print(Markdown(payload["text"]))
             for tc in payload.get("tool_calls", []):
-                console.print(f"[yellow]{agent} → {tc['name']}({_truncate(str(tc['input']))})[/yellow]")
+                icon = TOOL_ICONS.get(tc["name"], "🔧")
+                summary = _summarize_call(tc["name"], tc["input"])
+                console.print(f"  [dim]{icon} {tc['name']}[/dim] [yellow]{summary}[/yellow]")
             usage = payload.get("usage")
             if usage:
                 self.total_input_tokens += usage["input_tokens"]
@@ -65,7 +80,8 @@ class TerminalSession:
         elif etype == "tool_result":
             for r in payload["results"]:
                 style = "red" if r["is_error"] else "dim"
-                console.print(f"[{style}]  ↳ {_truncate(r['output'], 300)}[/{style}]")
+                first_line = r["output"].strip().split("\n")[0][:120]
+                console.print(f"    [{style}]↳ {first_line}[/{style}]")
 
         elif etype == "status" and payload.get("status") == "paused":
             self.is_paused = True
@@ -79,31 +95,35 @@ class TerminalSession:
 async def listen(session: TerminalSession, ws_url: str) -> None:
     async with websockets.connect(ws_url) as ws:
         async for raw in ws:
-            event = json.loads(raw)
-            session.render_event(event)
+            session.render_event(json.loads(raw))
+
+
+async def _post(path: str, json_body: dict, timeout: float = 120.0) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{GATEWAY_URL}{path}", json=json_body)
+            if resp.status_code != 200:
+                console.print(f"[red]request failed ({resp.status_code}): {resp.text[:300]}[/red]")
+    except Exception as e:
+        console.print(f"[red]request error: {e}[/red]")
 
 
 async def run_task(session: TerminalSession, task: str) -> None:
-    session._last_sent_task = task  # so render_event knows to skip the echo-back of this exact message
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        await client.post(
-            f"{GATEWAY_URL}/sessions/{session.session_id}/run",
-            json={"task": task, "agent_id": session.agent_id},
-        )
+    session._last_sent_task = task
+    await _post(f"/sessions/{session.session_id}/run", {"task": task, "agent_id": session.agent_id})
 
 
 async def pause(session: TerminalSession) -> None:
-    async with httpx.AsyncClient() as client:
-        await client.post(f"{GATEWAY_URL}/sessions/{session.session_id}/pause", json={"agent_id": session.agent_id})
+    await _post(f"/sessions/{session.session_id}/pause", {"agent_id": session.agent_id}, timeout=10.0)
     session.is_paused = True
     session.print_status()
 
 
 async def resume(session: TerminalSession) -> None:
     session.is_paused = False
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        await client.post(f"{GATEWAY_URL}/sessions/{session.session_id}/resume", json={"agent_id": session.agent_id})
-    session.print_status()
+    console.print("[dim]⏵ resuming…[/dim]")
+    await _post(f"/sessions/{session.session_id}/resume", {"agent_id": session.agent_id})
+    console.print("[dim]resume request finished[/dim]")
 
 
 async def create_session() -> str:

@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from pydantic import BaseModel
 from cerberus.tools.base import ToolSpec, ToolResult, AgentContext
+import itertools
 
 
 class SearchFilesInput(BaseModel):
@@ -11,13 +12,26 @@ class SearchFilesInput(BaseModel):
     file_glob: str = "*"
     max_results: int = 50
 
+def _expand_braces(pattern: str) -> list[str]:
+    """
+    Expand a single {a,b,c} alternation into multiple literal glob patterns,
+    since Path.rglob() doesn't support brace syntax natively.
+    Only handles one alternation group — good enough for the common
+    '*.{js,ts,py}' case models keep reaching for.
+    """
+    match = re.search(r"\{([^{}]+)\}", pattern)
+    if not match:
+        return [pattern]
+    options = match.group(1).split(",")
+    return [pattern[:match.start()] + opt + pattern[match.end():] for opt in options]
 
 class SearchFilesTool:
     spec = ToolSpec(
         name="search_files",
         description=(
             "Find files by name/glob, optionally filtering by content regex. "
-            "Omit 'pattern' to just list files matching file_glob; provide it to search their contents."
+            "Omit 'pattern' to just list files matching file_glob; provide it to search their contents. "
+            "file_glob supports simple wildcards (*.py) and one {a,b,c} alternation group (*.{py,md})."
         ),
         permission="read",
     )
@@ -38,17 +52,20 @@ class SearchFilesTool:
             base = Path(ctx.cwd) / input.path
             ignore_dirs = self.ignore_dirs
 
-            all_files = [
-                f for f in base.rglob(input.file_glob)
-                if f.is_file() and not any(part in ignore_dirs for part in f.parts)
-            ]
+            patterns = _expand_braces(input.file_glob)
+            all_files = []
+            seen = set()
+            for pat in patterns:
+                for f in base.rglob(pat):
+                    if f.is_file() and not any(part in ignore_dirs for part in f.parts) and f not in seen:
+                        seen.add(f)
+                        all_files.append(f)
+
             truncated = len(all_files) > input.max_results
             files = [str(f) for f in all_files[: input.max_results]]
-
             output = "\n".join(files) or "(no files found)"
             if truncated:
                 output += f"\n... truncated, showing {input.max_results} of {len(all_files)} total"
-
             return ToolResult(ok=True, output=output, error=None)
         except Exception as e:
             return ToolResult(ok=False, output="", error=str(e))

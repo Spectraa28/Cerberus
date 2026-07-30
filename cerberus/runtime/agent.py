@@ -1,3 +1,4 @@
+import json
 from cerberus.tools.registry import ToolRegistry
 from cerberus.tools.base import AgentContext
 from cerberus.tools.adapter import tools_to_api_schema
@@ -7,11 +8,6 @@ from cerberus.runtime.compaction import compact_if_needed
 
 
 async def reconstruct_history(event_log: EventLog, session_id: str, agent_id: str) -> list[Turn]:
-    """
-    Rebuild a Turn history for one agent from the event log, starting from
-    its latest summary (if any) rather than from the beginning — shared by
-    Runtime.resume() and the gateway's spawn endpoint so both stay in sync.
-    """
     all_events = await event_log.replay_from(session_id)
     agent_events = [e for e in all_events if e["agent_id"] == agent_id]
 
@@ -48,7 +44,7 @@ class Runtime:
         input_models: dict[str, type],
         max_turns: int = 10,
         event_log: EventLog | None = None,
-        pause_checker=None
+        pause_checker=None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -62,9 +58,25 @@ class Runtime:
         if self.event_log:
             await self.event_log.append_event(ctx.session_id, ctx.agent_id, event_type, payload)
 
-    async def _dispatch_tools(self, tool_calls: list[ToolCall], ctx: AgentContext) -> list[dict]:
+    async def _dispatch_tools(self, tool_calls: list[ToolCall], ctx: AgentContext, recent_calls: set[str]) -> list[dict]:
         results = []
         for tc in tool_calls:
+            signature = f"{tc.name}:{json.dumps(tc.input, sort_keys=True)}"
+
+            if signature in recent_calls:
+                results.append({
+                    "tool_call_id": tc.id,
+                    "name": tc.name,
+                    "output": (
+                        f"You already called {tc.name} with these exact arguments earlier in this task "
+                        f"and it did not help. Do not repeat it — try a genuinely different approach, "
+                        f"or explain to the user why you're stuck."
+                    ),
+                    "is_error": True,
+                })
+                continue
+            recent_calls.add(signature)
+
             tool = self.registry.get(tc.name)
             model = self.input_models[tc.name]
             tool_input = model(**tc.input)
@@ -73,8 +85,6 @@ class Runtime:
             if result.ok:
                 output_text = result.output
             else:
-                # Never discard stdout on failure — many tools (pytest, linters, etc.)
-                # write their real diagnostic info there, not to stderr.
                 parts = []
                 if result.output:
                     parts.append(result.output)
@@ -91,6 +101,8 @@ class Runtime:
         return results
 
     async def _loop(self, history: list[Turn], ctx: AgentContext) -> str:
+        recent_calls: set[str] = set()
+
         for _ in range(self.max_turns):
             if self.pause_checker and await self.pause_checker(ctx):
                 await self._log(ctx, "status", {"status": "paused"})
@@ -114,7 +126,7 @@ class Runtime:
                 "usage": usage_payload,
             })
 
-            results = await self._dispatch_tools(response.tool_calls, ctx)
+            results = await self._dispatch_tools(response.tool_calls, ctx, recent_calls)
             history.append(ToolResultTurn(results=results))
             await self._log(ctx, "tool_result", {"results": results})
 
@@ -132,7 +144,7 @@ class Runtime:
         history = await reconstruct_history(self.event_log, ctx.session_id, ctx.agent_id)
 
         if history and isinstance(history[-1], AssistantTurn) and history[-1].tool_calls:
-            results = await self._dispatch_tools(history[-1].tool_calls, ctx)
+            results = await self._dispatch_tools(history[-1].tool_calls, ctx, set())
             history.append(ToolResultTurn(results=results))
             await self._log(ctx, "tool_result", {"results": results})
 
